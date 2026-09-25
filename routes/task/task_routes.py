@@ -19,7 +19,7 @@ from src.task_action_policy import (
     is_admin_only_task_action,
     owner_has_admin_task_privileges,
 )
-from src.task_scheduler import compute_next_run, HOUSEKEEPING_DEFAULTS
+from src.task_scheduler import compute_next_run, parse_scheduled_date, HOUSEKEEPING_DEFAULTS
 from routes.prefs_routes import _load_for_user, _save_for_user
 
 logger = logging.getLogger(__name__)
@@ -493,8 +493,8 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         if req.trigger_type == "schedule":
             if req.schedule == "once" and req.scheduled_date:
                 try:
-                    sched_date = datetime.fromisoformat(req.scheduled_date.replace("Z", "+00:00")).replace(tzinfo=None)
-                except ValueError:
+                    sched_date = parse_scheduled_date(req.scheduled_date)
+                except (TypeError, ValueError):
                     raise HTTPException(400, "Invalid scheduled_date format")
             next_run = compute_next_run(
                 req.schedule, req.scheduled_time,
@@ -802,13 +802,17 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             if user and task.owner != user:
                 raise HTTPException(403, "Access denied")
             _require_admin_for_task_action(user, task.task_type, task.action)
-            task.status = "active"
+            next_run = None
             if (task.trigger_type or "schedule") == "schedule":
-                task.next_run = compute_next_run(
+                next_run = compute_next_run(
                     task.schedule, task.scheduled_time,
                     task.scheduled_day, task.scheduled_date,
                     cron_expression=task.cron_expression,
                 )
+                if next_run is None:
+                    raise HTTPException(400, "Scheduled task requires a valid future next_run")
+            task.status = "active"
+            task.next_run = next_run
             db.commit()
             return {"ok": True, "status": "active", "next_run": task.next_run.isoformat() + "Z" if task.next_run else None}
         finally:

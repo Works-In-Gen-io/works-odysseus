@@ -230,6 +230,15 @@ def compute_next_run(schedule: str, scheduled_time: str,
     return None
 
 
+def parse_scheduled_date(value: str | datetime | None) -> datetime | None:
+    """Parse an ISO scheduled_date using the API's naive-UTC semantics."""
+    if value is None or isinstance(value, datetime):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("scheduled_date must be an ISO datetime")
+    return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).replace(tzinfo=None)
+
+
 def _resolve_task_timezone(db, task) -> str | None:
     """Look up the IANA timezone name for a task via its linked CrewMember, if any."""
     if not getattr(task, "crew_member_id", None):

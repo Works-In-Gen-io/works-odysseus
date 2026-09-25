@@ -275,7 +275,7 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
     """Handle manage_tasks tool calls: CRUD on scheduled tasks."""
     import uuid as _uuid
     from core.database import SessionLocal, ScheduledTask
-    from src.task_scheduler import compute_next_run
+    from src.task_scheduler import compute_next_run, parse_scheduled_date
 
     try:
         args = _parse_tool_args(content)
@@ -340,12 +340,23 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
 
             # Compute next_run for schedule triggers
             next_run = None
+            scheduled_date = None
             if trigger_type == "schedule":
                 schedule = args.get("schedule", "daily")
+                if schedule == "once":
+                    if not args.get("scheduled_date"):
+                        return {"error": "scheduled_date is required for once schedules", "exit_code": 1}
+                    try:
+                        scheduled_date = parse_scheduled_date(args["scheduled_date"])
+                    except (TypeError, ValueError):
+                        return {"error": "Invalid scheduled_date format", "exit_code": 1}
                 next_run = compute_next_run(
                     schedule, args.get("scheduled_time", "09:00"),
                     args.get("scheduled_day"),
+                    scheduled_date,
                 )
+                if next_run is None:
+                    return {"error": "Scheduled task must have a valid future next_run", "exit_code": 1}
 
             task_id = str(_uuid.uuid4())
             # Guard each fallback with `or`: args.get("prompt", default) returns
@@ -362,6 +373,7 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
                 schedule=args.get("schedule") if trigger_type == "schedule" else None,
                 scheduled_time=args.get("scheduled_time", "09:00") if trigger_type == "schedule" else None,
                 scheduled_day=args.get("scheduled_day"),
+                scheduled_date=scheduled_date,
                 trigger_type=trigger_type,
                 trigger_event=args.get("trigger_event"),
                 trigger_count=args.get("trigger_count"),
@@ -416,10 +428,23 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
                     changed.append(field)
                     schedule_changed = True
 
+            if args.get("scheduled_date") is not None:
+                try:
+                    task.scheduled_date = parse_scheduled_date(args["scheduled_date"])
+                except (TypeError, ValueError):
+                    return {"error": "Invalid scheduled_date format", "exit_code": 1}
+                changed.append("scheduled_date")
+                schedule_changed = True
+
             if schedule_changed and (task.trigger_type or "schedule") == "schedule":
+                if task.schedule == "once" and task.scheduled_date is None:
+                    return {"error": "scheduled_date is required for once schedules", "exit_code": 1}
                 task.next_run = compute_next_run(
                     task.schedule, task.scheduled_time, task.scheduled_day,
+                    task.scheduled_date,
                 )
+                if task.next_run is None:
+                    return {"error": "Scheduled task must have a valid future next_run", "exit_code": 1}
 
             db.commit()
             return {"response": f"Updated task '{task.name}': {', '.join(changed)}", "exit_code": 0}
