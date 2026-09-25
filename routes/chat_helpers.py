@@ -452,8 +452,8 @@ def _has_auth_keys(headers) -> bool:
     )
 
 
-def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
-    """Ensure session has auth headers — resolve from endpoint DB if missing."""
+def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None, *, persist_headers: bool = True) -> bool:
+    """Resolve session auth from the endpoint DB without persisting by default for tools."""
     try:
         from src.chatgpt_subscription import is_chatgpt_subscription_base
         is_chatgpt_subscription = is_chatgpt_subscription_base(getattr(sess, "endpoint_url", "") or "")
@@ -461,7 +461,7 @@ def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
         is_chatgpt_subscription = False
     has_auth = _has_auth_keys(sess.headers)
     if has_auth and not is_chatgpt_subscription:
-        return
+        return True
 
     try:
         from src.endpoint_resolver import build_headers, resolve_endpoint_runtime
@@ -469,7 +469,7 @@ def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
         try:
             target_url = getattr(sess, "endpoint_url", "") or ""
             if not target_url:
-                return
+                return False
             q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
             if owner:
                 # Missing headers usually means "recover from the saved endpoint".
@@ -484,10 +484,10 @@ def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
                     base, api_key = resolve_endpoint_runtime(ep, owner=owner)
                 except Exception as e:
                     logger.warning("Failed to resolve provider auth for session %s: %s", session_id, e)
-                    return
+                    return False
                 if not api_key:
                     # No usable key (e.g. ChatGPT Subscription needs re-auth).
-                    return
+                    return True
                 sess.headers = build_headers(api_key, base)
                 if is_chatgpt_subscription:
                     # The bearer is short-lived and re-resolved per request, so it
@@ -503,18 +503,22 @@ def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
                         db.commit()
                         logger.info(f"Cleared persisted ChatGPT Subscription bearer from session {session_id}")
                     logger.debug(f"Resolved request-local ChatGPT Subscription auth for session {session_id}")
-                    return
-                update_q = db.query(DBSession).filter(DBSession.id == session_id)
-                if owner:
-                    update_q = update_q.filter(DBSession.owner == owner)
-                update_q.update({"headers": sess.headers})
-                db.commit()
-                logger.info(f"Resolved and persisted auth headers for session {session_id} from endpoint {ep.name}")
-                return
+                    return True
+                if persist_headers:
+                    update_q = db.query(DBSession).filter(DBSession.id == session_id)
+                    if owner:
+                        update_q = update_q.filter(DBSession.owner == owner)
+                    update_q.update({"headers": sess.headers})
+                    db.commit()
+                    logger.info(f"Resolved and persisted auth headers for session {session_id} from endpoint {ep.name}")
+                else:
+                    logger.debug(f"Resolved request-local auth for session {session_id}")
+                return True
         finally:
             db.close()
     except Exception as e:
         logger.warning(f"Failed to resolve session headers: {e}")
+    return False
 
 
 def _match_cached_model_id(requested: str, models) -> Optional[str]:
