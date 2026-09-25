@@ -1,6 +1,7 @@
 """Regression coverage for one-shot scheduled agent tasks."""
 
 import json
+import asyncio
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -124,3 +125,105 @@ async def test_resume_rejects_once_without_future_next_run(task_db, monkeypatch)
     task = _read(task_db, "paused-once")
     assert task.status == "paused"
     assert task.next_run is None
+
+
+@pytest.mark.asyncio
+async def test_manage_resume_once_materializes_scheduled_date(task_db, monkeypatch):
+    future = (datetime.utcnow() + timedelta(hours=1)).replace(microsecond=0)
+    db = task_db()
+    db.add(ScheduledTask(
+        id="resume-once", owner="alice", name="paused", prompt="p", task_type="llm",
+        trigger_type="schedule", schedule="once", scheduled_date=future, status="paused",
+    ))
+    db.commit(); db.close()
+
+    monkeypatch.setattr(cdb, "SessionLocal", task_db)
+    out = await do_manage_tasks(json.dumps({"action": "resume", "task_id": "resume-once"}), owner="alice")
+    task = _read(task_db, "resume-once")
+    assert out["exit_code"] == 0
+    assert task.status == "active"
+    assert task.next_run == future
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scheduled_date", [None, datetime.utcnow() - timedelta(hours=1)])
+async def test_manage_resume_once_rejects_invalid_date(task_db, monkeypatch, scheduled_date):
+    db = task_db()
+    db.add(ScheduledTask(
+        id="resume-invalid", owner="alice", name="paused", prompt="p", task_type="llm",
+        trigger_type="schedule", schedule="once", scheduled_date=scheduled_date, status="paused",
+    ))
+    db.commit(); db.close()
+
+    monkeypatch.setattr(cdb, "SessionLocal", task_db)
+    out = await do_manage_tasks(json.dumps({"action": "resume", "task_id": "resume-invalid"}), owner="alice")
+    task = _read(task_db, "resume-invalid")
+    assert out["exit_code"] == 1
+    assert task.status == "paused"
+    assert task.next_run is None
+
+
+@pytest.mark.asyncio
+async def test_http_update_once_fails_closed_and_accepts_future(task_db, monkeypatch):
+    future = (datetime.utcnow() + timedelta(hours=1)).replace(microsecond=0)
+    db = task_db()
+    db.add(ScheduledTask(
+        id="http-once", owner="alice", name="active", prompt="p", task_type="llm",
+        trigger_type="schedule", schedule="daily", scheduled_time="09:00", status="active",
+        next_run=future,
+    ))
+    db.commit(); db.close()
+
+    import routes.task.task_routes as task_routes
+    monkeypatch.setattr(task_routes, "SessionLocal", task_db)
+    monkeypatch.setattr(task_routes, "get_current_user", lambda request: "alice")
+    router = task_routes.setup_task_routes(None)
+    endpoint = next(r.endpoint for r in router.routes if r.path == "/api/tasks/{task_id}" and "PUT" in r.methods)
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        await endpoint(SimpleNamespace(), "http-once", task_routes.TaskUpdate(schedule="once"))
+    assert exc.value.status_code == 400
+    task = _read(task_db, "http-once")
+    assert task.status == "active"
+    assert task.schedule == "daily"
+    assert task.next_run == future
+
+    updated = await endpoint(
+        SimpleNamespace(), "http-once",
+        task_routes.TaskUpdate(schedule="once", scheduled_date=future.isoformat()),
+    )
+    assert updated["schedule"] == "once"
+    task = _read(task_db, "http-once")
+    assert task.next_run == future
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_selects_due_one_shot_task(task_db, monkeypatch):
+    from src.task_scheduler import TaskScheduler
+
+    db = task_db()
+    db.add(ScheduledTask(
+        id="due-once", owner="alice", name="due", prompt="p", task_type="llm",
+        trigger_type="schedule", schedule="once", status="active",
+        next_run=datetime.utcnow() - timedelta(minutes=1),
+    ))
+    db.commit(); db.close()
+
+    scheduler = TaskScheduler.__new__(TaskScheduler)
+    scheduler._executing = set()
+    scheduler._executing_lock = asyncio.Lock()
+    dispatched = []
+
+    def capture(coro):
+        dispatched.append(coro)
+        coro.close()
+
+    monkeypatch.setattr(cdb, "SessionLocal", task_db)
+    monkeypatch.setattr("src.task_scheduler.asyncio.create_task", capture)
+    monkeypatch.setattr("src.interactive_gate.has_foreground_activity", lambda: False)
+
+    await scheduler._check_due_tasks()
+
+    assert dispatched
+    assert "due-once" in scheduler._executing

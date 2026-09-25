@@ -741,11 +741,14 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                 schedule_changed = True
 
             if schedule_changed and task.status == "active" and (task.trigger_type or "schedule") == "schedule":
-                task.next_run = compute_next_run(
+                next_run = compute_next_run(
                     task.schedule, task.scheduled_time,
                     task.scheduled_day, task.scheduled_date,
                     cron_expression=task.cron_expression,
                 )
+                if next_run is None:
+                    raise HTTPException(400, "Scheduled task requires a valid future next_run")
+                task.next_run = next_run
 
             db.commit()
             db.refresh(task)

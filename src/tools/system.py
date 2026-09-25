@@ -476,11 +476,17 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
             if action == "pause":
                 task.status = "paused"
             else:
-                task.status = "active"
                 if (task.trigger_type or "schedule") == "schedule":
-                    task.next_run = compute_next_run(
+                    next_run = compute_next_run(
                         task.schedule, task.scheduled_time, task.scheduled_day,
+                        task.scheduled_date,
                     )
+                    if next_run is None:
+                        return {"error": "Scheduled task requires a valid future next_run", "exit_code": 1}
+                    task.next_run = next_run
+                else:
+                    task.next_run = None
+                task.status = "active"
             db.commit()
             return {"response": f"Task '{task.name}' {action}d", "exit_code": 0}
 
