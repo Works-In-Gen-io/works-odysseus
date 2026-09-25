@@ -217,6 +217,12 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
                 ),
                 "offline_transcript": True,
             }
+        # Session rows intentionally do not carry delegated credentials. Resolve
+        # the current endpoint credential at send time and keep it request-local.
+        from routes.chat_helpers import resolve_session_auth
+        if not resolve_session_auth(sess, target_sid, owner=owner, persist_headers=False):
+            return {"error": "Unable to resolve a valid endpoint for this session"}
+
         context.append({"role": "user", "content": message})
 
         response = await llm_call_async(

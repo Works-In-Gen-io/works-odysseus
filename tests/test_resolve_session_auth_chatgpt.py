@@ -10,6 +10,7 @@ ProviderAuthSession is allowed to persist.
 
 import types
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -121,6 +122,55 @@ def test_non_subscription_auth_is_still_persisted_to_sessions_table(monkeypatch)
     finally:
         db.close()
 
+
+@pytest.mark.parametrize(
+    ("name", "base_url", "model", "resolved_key"),
+    [
+        ("DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat", "test-deepseek-key"),
+        ("OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini", "test-openrouter-key"),
+    ],
+)
+def test_request_local_delegated_auth_is_not_persisted_for_provider(
+    monkeypatch, name, base_url, model, resolved_key
+):
+    """A real DB row remains header-free when tools request request-local auth."""
+    TestSessionLocal = _mem_db(monkeypatch)
+    db = TestSessionLocal()
+    try:
+        db.add(ModelEndpoint(
+            id=f"{name.lower()}-ep", name=name, base_url=base_url,
+            owner="alice", is_enabled=True, api_key="stored-config-key",
+        ))
+        db.add(DbSession(
+            id=f"{name.lower()}-sess", name="child", endpoint_url=base_url + "/chat/completions",
+            model=model, owner="alice", headers={},
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    monkeypatch.setattr(
+        endpoint_resolver,
+        "resolve_endpoint_runtime",
+        lambda ep, owner=None: (base_url, resolved_key),
+    )
+    sess = types.SimpleNamespace(
+        id=f"{name.lower()}-sess", endpoint_url=base_url + "/chat/completions",
+        model=model, owner="alice", headers={},
+    )
+
+    assert chat_helpers.resolve_session_auth(
+        sess, sess.id, owner="alice", persist_headers=False
+    ) is True
+    assert sess.headers["Authorization"] == f"Bearer {resolved_key}"
+
+    db = TestSessionLocal()
+    try:
+        row = db.query(DbSession).filter(DbSession.id == sess.id).one()
+        assert row.headers == {}
+        assert resolved_key not in str(row.headers)
+    finally:
+        db.close()
 
 def test_chatgpt_subscription_clears_previously_persisted_bearer(monkeypatch):
     """A bearer left at rest by an older code path is stripped on next resolve."""
