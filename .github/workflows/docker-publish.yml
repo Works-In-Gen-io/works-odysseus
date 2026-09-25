@@ -9,6 +9,7 @@ name: ci / docker publish
 # Registry: ghcr.io/<owner>/<repo>.
 
 on:
+  workflow_dispatch:
   push:
     branches: [dev, main]
     paths-ignore:
