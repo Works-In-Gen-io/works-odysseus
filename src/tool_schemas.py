@@ -580,6 +580,7 @@ FUNCTION_TOOL_SCHEMAS = [
                                  "description": "Schedule frequency (for trigger_type=schedule)"},
                     "scheduled_time": {"type": "string", "description": "HH:MM in UTC (for schedule triggers). Convert the user's stated local time using the UTC offset given in the 'Current date and time' context."},
                     "scheduled_day": {"type": "integer", "description": "Day of week 0=Mon (weekly) or day of month (monthly)"},
+                    "scheduled_date": {"type": "string", "description": "ISO datetime in the future (required for schedule=once)"},
                     "trigger_event": {"type": "string", "enum": ["session_created", "message_sent", "document_created", "memory_added", "research_completed", "email_received", "skill_added"],
                                       "description": "Event name (for trigger_type=event)"},
                     "trigger_count": {"type": "integer", "description": "Fire every N events (for trigger_type=event)"},
